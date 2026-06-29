@@ -26,7 +26,8 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ limit: '15mb', extended: true }));
 
 // Log incoming requests
 app.use((req, res, next) => {
@@ -192,6 +193,70 @@ const hasFuzzyMatch = (targetWord, tokenList) => {
   });
 };
 
+// Helper to enrich medicines with 5 generic alternatives and calculate cost/savings summary
+function enrichAndSummarizeMedicines(matched) {
+  const allMeds = db.medicines.findMany();
+  const enrichedMatched = matched.map(m => {
+    const mGenericBase = m.genericName.split(' ')[0].toLowerCase();
+    const mCompBase = m.composition.split(' ')[0].toLowerCase();
+
+    let alts = allMeds.filter(alt => 
+      alt.id !== m.id && 
+      (alt.genericName.toLowerCase().includes(mGenericBase) || 
+       m.genericName.toLowerCase().includes(alt.genericName.split(' ')[0].toLowerCase()) ||
+       alt.composition.toLowerCase().includes(mCompBase) || 
+       m.composition.toLowerCase().includes(alt.composition.split(' ')[0].toLowerCase()))
+    );
+
+    if (alts.length < 5) {
+      const categoryMeds = allMeds.filter(alt => 
+        alt.id !== m.id && 
+        alt.category === m.category && 
+        !alts.some(a => a.id === alt.id)
+      );
+      alts = [...alts, ...categoryMeds];
+    }
+
+    if (alts.length < 5) {
+      const generalMeds = allMeds.filter(alt => 
+        alt.id !== m.id && 
+        !alts.some(a => a.id === alt.id)
+      ).sort((a, b) => b.savings - a.savings);
+      alts = [...alts, ...generalMeds];
+    }
+
+    return {
+      ...m,
+      alternatives: alts.slice(0, 5).map(alt => ({
+        id: alt.id,
+        brandName: alt.brandName,
+        genericName: alt.genericName,
+        composition: alt.composition,
+        brandPrice: alt.brandPrice,
+        genericPrice: alt.genericPrice,
+        savings: alt.savings,
+        manufacturer: alt.manufacturer,
+        details: alt.details
+      }))
+    };
+  });
+
+  const totalBrandedPrice = enrichedMatched.reduce((sum, m) => sum + m.brandPrice, 0);
+  const totalGenericPrice = enrichedMatched.reduce((sum, m) => sum + m.genericPrice, 0);
+  const totalSavings = totalBrandedPrice - totalGenericPrice;
+  const savingsPercent = totalBrandedPrice > 0 ? Math.round((totalSavings / totalBrandedPrice) * 100) : 0;
+
+  return {
+    matchedMedicines: enrichedMatched,
+    summary: {
+      totalBrandedPrice: parseFloat(totalBrandedPrice.toFixed(2)),
+      totalGenericPrice: parseFloat(totalGenericPrice.toFixed(2)),
+      totalSavings: parseFloat(totalSavings.toFixed(2)),
+      savingsPercent
+    }
+  };
+}
+
 // Endpoint: Prescription Cost Optimizer OCR/NLP matching
 app.post('/api/parse-prescription', async (req, res) => {
   const { text } = req.body;
@@ -227,7 +292,11 @@ ${JSON.stringify(medicinesMin)}
 Instructions:
 1. Identify each prescribed medicine from the prescription text.
 2. For each identified medicine, find the best match in the available database list (either by brandName, genericName, or composition, accounting for minor spelling/OCR errors).
-3. Return ONLY a valid JSON array containing the matching medicine IDs from the database, for example: [1, 5, 23].
+3. Return ONLY a valid JSON array of objects, where each object contains the matched medicine ID from the database and the exact name of the medicine as written/identified in the prescription text, for example:
+[
+  { "id": 1, "writtenName": "Crocin 650mg" },
+  { "id": 5, "writtenName": "Pantocid 40" }
+]
 4. Do not include any markdown styling, code block backticks (like \`\`\`json), or conversational text. Return ONLY the raw JSON array.`;
 
       const response = await fetch(
@@ -258,12 +327,30 @@ Instructions:
           }
           textResult = textResult.trim();
 
-          const ids = JSON.parse(textResult);
-          if (Array.isArray(ids)) {
-            const idSet = new Set(ids);
-            matched = medicines.filter(m => idSet.has(m.id));
+          const parsed = JSON.parse(textResult);
+          if (Array.isArray(parsed)) {
+            matched = parsed.map(item => {
+              if (item && typeof item === 'object' && 'id' in item) {
+                const med = medicines.find(m => m.id === item.id);
+                if (med) {
+                  return {
+                    ...med,
+                    writtenName: item.writtenName || med.brandName
+                  };
+                }
+              } else if (typeof item === 'number') {
+                const med = medicines.find(m => m.id === item);
+                if (med) {
+                  return {
+                    ...med,
+                    writtenName: med.brandName
+                  };
+                }
+              }
+              return null;
+            }).filter(Boolean);
             usedAI = true;
-            console.log(`Gemini parsed successfully. Matched ${matched.length} medicines:`, matched.map(m => m.brandName));
+            console.log(`Gemini parsed successfully. Matched ${matched.length} medicines:`, matched.map(m => m.writtenName));
           }
         }
       } else {
@@ -275,57 +362,247 @@ Instructions:
   }
 
   // Fallback to heuristic matching if AI key is missing, call failed, or produced no matches
-  if (!usedAI) {
-    console.log('Falling back to local heuristic token-matching...');
-    const lines = text.split('\n');
+  if (!usedAI || matched.length === 0) {
+    console.log('Using local heuristic token-matching...');
+    
+    // Stopwords and units to exclude from matching
+    const stopWords = new Set([
+      'tab', 'tabs', 'tablet', 'tablets', 'cap', 'caps', 'capsule', 'capsules',
+      'mg', 'mcg', 'ml', 'g', 'daily', 'twice', 'thrice', 'once', 'night',
+      'morning', 'noon', 'bed', 'water', 'food', 'after', 'before', 'every',
+      'take', 'days', 'weeks', 'qty', 'each', 'prescription', 'patient',
+      'clinic', 'doctor', 'name', 'date', 'rx', 'sol', 'sos', 'with', 'and', 'for'
+    ]);
+
+    // Helper to normalize OCR character substitutions and strip non-letters
+    const normalizeOcr = (str) => {
+      if (!str) return '';
+      return str.toLowerCase()
+        .replace(/0/g, 'o')
+        .replace(/1/g, 'i')
+        .replace(/3/g, 'e')
+        .replace(/4/g, 'a')
+        .replace(/5/g, 's')
+        .replace(/8/g, 'b')
+        .replace(/[^a-z]/g, '');
+    };
+
+    const lines = text.split(/\r?\n/);
+    
     for (const line of lines) {
-      const tokens = line.toLowerCase().replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
-      if (tokens.length === 0) continue;
+      if (!line.trim()) continue;
+      
+      // Extract clean alphanumeric tokens
+      const tokens = line.toLowerCase()
+        .replace(/[^a-zA-Z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
+        
+      // Filter out stop words and numbers/strengths (purely numeric tokens)
+      const cleanTokens = tokens.filter(t => !stopWords.has(t) && isNaN(t) && t.length > 2);
+      if (cleanTokens.length === 0) continue;
 
       for (const medicine of medicines) {
-        const brandWords = medicine.brandName.toLowerCase().split(/\s+/).filter(Boolean);
-        const compWords = medicine.composition.toLowerCase().replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(word => word.length > 3);
-        
-        // Match condition: if a line contains substantial keywords of a branded drug
-        const brandMatchScore = brandWords.filter(word => hasFuzzyMatch(word, tokens)).length;
-        const brandMatchStrength = brandWords.length > 0 ? brandMatchScore / brandWords.length : 0;
+        // Extract base brand name (first word, ignoring strength/dosage)
+        const baseBrand = medicine.brandName.split(/\s+/)[0];
+        const normalizedBaseBrand = normalizeOcr(baseBrand);
 
-        // Match condition: if a line contains substantial keywords of the composition
-        const compMatchScore = compWords.filter(word => hasFuzzyMatch(word, tokens)).length;
-        const compMatchStrength = compWords.length > 0 ? compMatchScore / compWords.length : 0;
-        
-        // Threshold for a match: brand or composition keyword match
-        if (
-          (brandMatchStrength >= 0.5 && brandWords.length > 0) || 
-          (compMatchStrength >= 0.4 && compWords.length > 0) ||
-          line.toLowerCase().includes(medicine.brandName.toLowerCase()) ||
-          line.toLowerCase().includes(medicine.composition.toLowerCase()) ||
-          diceCoefficient(line, medicine.brandName) >= 0.5 ||
-          diceCoefficient(line, medicine.genericName) >= 0.5
-        ) {
+        // Extract composition words (ignoring numbers and short words)
+        const compWords = medicine.composition
+          .replace(/[^a-zA-Z\s]/g, ' ')
+          .split(/\s+/)
+          .filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
+
+        // Check if any clean token matches the brand name
+        let isMatch = false;
+
+        for (const token of cleanTokens) {
+          const normalizedToken = normalizeOcr(token);
+          
+          if (!normalizedToken) continue;
+
+          // 1. Check brand match (exact or fuzzy normalized)
+          if (normalizedToken === normalizedBaseBrand || normalizedBaseBrand.includes(normalizedToken) || normalizedToken.includes(normalizedBaseBrand)) {
+            isMatch = true;
+            break;
+          }
+          if (diceCoefficient(normalizedToken, normalizedBaseBrand) >= 0.6) {
+            isMatch = true;
+            break;
+          }
+
+          // 2. Check composition match
+          for (const compWord of compWords) {
+            const normalizedComp = normalizeOcr(compWord);
+            if (!normalizedComp) continue;
+
+            if (normalizedToken === normalizedComp || normalizedComp.includes(normalizedToken) || normalizedToken.includes(normalizedComp)) {
+              isMatch = true;
+              break;
+            }
+            if (diceCoefficient(normalizedToken, normalizedComp) >= 0.6) {
+              isMatch = true;
+              break;
+            }
+          }
+          
+          if (isMatch) break;
+        }
+
+        // 3. Fallback: if the raw line contains the brand name or generic name as a whole substring
+        if (!isMatch) {
+          const lowerLine = line.toLowerCase();
+          const lowerBrand = medicine.brandName.toLowerCase();
+          const lowerGeneric = medicine.genericName.toLowerCase();
+          
+          if (lowerLine.includes(lowerBrand) || lowerBrand.includes(lowerLine) ||
+              lowerLine.includes(lowerGeneric) || lowerGeneric.includes(lowerLine)) {
+            isMatch = true;
+          }
+        }
+
+        if (isMatch) {
           if (!matched.some(m => m.id === medicine.id)) {
-            matched.push(medicine);
+            matched.push({
+              ...medicine,
+              writtenName: line.trim()
+            });
           }
         }
       }
     }
   }
 
-  // Calculate total costs and savings for matched drugs
-  const totalBrandedPrice = matched.reduce((sum, m) => sum + m.brandPrice, 0);
-  const totalGenericPrice = matched.reduce((sum, m) => sum + m.genericPrice, 0);
-  const totalSavings = totalBrandedPrice - totalGenericPrice;
-  const savingsPercent = totalBrandedPrice > 0 ? Math.round((totalSavings / totalBrandedPrice) * 100) : 0;
+  const enrichedResult = enrichAndSummarizeMedicines(matched);
+  res.json(enrichedResult);
+});
 
-  res.json({
-    matchedMedicines: matched,
-    summary: {
-      totalBrandedPrice: parseFloat(totalBrandedPrice.toFixed(2)),
-      totalGenericPrice: parseFloat(totalGenericPrice.toFixed(2)),
-      totalSavings: parseFloat(totalSavings.toFixed(2)),
-      savingsPercent
+// Endpoint: Prescription Cost Optimizer Multimodal AI (Image/PDF parsing + Matching)
+app.post('/api/optimize-prescription-file', async (req, res) => {
+  const { fileData, mimeType } = req.body;
+  if (!fileData || !mimeType) {
+    return res.status(400).json({ error: 'Please provide fileData (base64) and mimeType' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.log('Gemini API key is missing. Refusing file optimization request.');
+    return res.status(400).json({ error: 'GEMINI_API_KEY_MISSING', message: 'Gemini API Key is not configured on the server.' });
+  }
+
+  try {
+    console.log(`Using Gemini AI to parse multimodal prescription file (${mimeType})...`);
+    const medicines = db.medicines.findMany();
+    const medicinesMin = medicines.map(m => ({
+      id: m.id,
+      brandName: m.brandName,
+      composition: m.composition,
+      genericName: m.genericName
+    }));
+
+    const promptText = `You are an expert medical AI system. Your task is to analyze the attached prescription document (which can be a photo or a PDF) and extract the medicines prescribed, then match them to our database.
+
+Instructions:
+1. Carefully read the document. It might contain handwritten notes, printed text, brand names, or chemical names.
+2. Extract all readable text from the document (like dosage, patient info, medicines, dates) and provide it as 'extractedText'.
+3. Match each prescribed medicine (either by brandName, genericName, or composition, accounting for minor spelling/OCR errors) to the best match in the available database list.
+4. Return ONLY a valid JSON object matching the schema below. Do not wrap in markdown blocks, do not include code backticks (like \`\`\`json), and do not include conversational text.
+
+Available Medicines in Database:
+${JSON.stringify(medicinesMin)}
+
+Response JSON Schema:
+{
+  "extractedText": "all raw extracted text here",
+  "extractedMedicines": [
+    { "name": "Brand Name or Composition as written in sheet", "dosage": "e.g. 500mg, 1 tab daily" }
+  ],
+  "matches": [
+    { "id": 1, "writtenName": "Name of the drug exactly as written/spelled in prescription" }
+  ]
+}
+
+Return ONLY the raw JSON string matching this schema.`;
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: promptText },
+                {
+                  inlineData: {
+                    mimeType: mimeType,
+                    data: fileData
+                  }
+                }
+              ]
+            }
+          ]
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Gemini API call failed:', response.status, errText);
+      throw new Error(`Gemini API returned status ${response.status}`);
     }
-  });
+
+    const data = await response.json();
+    if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts[0]) {
+      let textResult = data.candidates[0].content.parts[0].text.trim();
+      
+      // Clean markdown code blocks if present
+      if (textResult.startsWith('```')) {
+        textResult = textResult.replace(/^```[a-zA-Z]*\n?/, '');
+        textResult = textResult.replace(/```$/, '');
+      }
+      textResult = textResult.trim();
+
+      const parsedResult = JSON.parse(textResult);
+      if (parsedResult) {
+        let matched = [];
+        if (Array.isArray(parsedResult.matches)) {
+          matched = parsedResult.matches.map(item => {
+            const med = medicines.find(m => m.id === item.id);
+            if (med) {
+              return {
+                ...med,
+                writtenName: item.writtenName || med.brandName
+              };
+            }
+            return null;
+          }).filter(Boolean);
+        } else if (Array.isArray(parsedResult.matchedMedicineIds)) {
+          const idSet = new Set(parsedResult.matchedMedicineIds);
+          matched = medicines.filter(m => idSet.has(m.id)).map(m => ({
+            ...m,
+            writtenName: m.brandName
+          }));
+        }
+
+        console.log(`Gemini parsed file successfully. Matched ${matched.length} medicines.`);
+        
+        const enrichedResult = enrichAndSummarizeMedicines(matched);
+        return res.json({
+          extractedText: parsedResult.extractedText || '',
+          extractedMedicines: parsedResult.extractedMedicines || [],
+          ...enrichedResult
+        });
+      }
+    }
+    
+    throw new Error('Invalid or empty response from Gemini');
+  } catch (err) {
+    console.error('Failed to parse prescription file using Gemini AI:', err);
+    res.status(500).json({ error: 'AI_OPTIMIZATION_FAILED', message: err.message });
+  }
 });
 
 // Endpoint: Stock Availability Prediction (AI-powered simulator)
@@ -335,6 +612,12 @@ app.get('/api/stock/predict/:id', (req, res) => {
   if (!medicine) {
     return res.status(404).json({ error: 'Medicine not found' });
   }
+
+  // Deterministic seeded random helper based on medicine ID
+  const getSeededRandom = (seed) => {
+    const x = Math.sin(seed) * 10000;
+    return x - Math.floor(x);
+  };
 
   // Stock prediction logic
   let riskLevel = 'Low Risk';
@@ -347,7 +630,8 @@ app.get('/api/stock/predict/:id', (req, res) => {
     explanation = 'Currently depleted at nearby distributors. Expected restocking in 7-10 days.';
   } else if (medicine.availability === 'Low Stock') {
     riskLevel = 'High Risk';
-    daysRemaining = Math.floor(2 + Math.random() * 5);
+    const rand = getSeededRandom(id);
+    daysRemaining = Math.floor(2 + rand * 5);
     explanation = 'Surging demand and delayed local distributor shipments. Restock recommended immediately.';
   } else {
     // Category specific seasonal risk (e.g. respiratory and antibiotics in monsoon season)
@@ -356,10 +640,14 @@ app.get('/api/stock/predict/:id', (req, res) => {
     
     if (seasonalCategories.includes(medicine.category) && (currentMonth >= 5 && currentMonth <= 8)) {
       riskLevel = 'Medium Risk';
-      daysRemaining = Math.floor(12 + Math.random() * 10);
+      const rand = getSeededRandom(id + 1);
+      daysRemaining = Math.floor(12 + rand * 10);
       explanation = 'Monsoon season surge has increased sales velocity by 35%. Stock depletion possible in 2-3 weeks.';
     }
   }
+
+  const randVelocity = getSeededRandom(id + 2);
+  const weeklySalesVelocity = Math.floor(150 + randVelocity * 80);
 
   res.json({
     medicineId: id,
@@ -369,7 +657,7 @@ app.get('/api/stock/predict/:id', (req, res) => {
     riskLevel,
     daysRemaining,
     explanation,
-    weeklySalesVelocity: Math.floor(150 + Math.random() * 80),
+    weeklySalesVelocity,
     predictedRestockDate: new Date(Date.now() + (daysRemaining + 7) * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
   });
 });

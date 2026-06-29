@@ -13,6 +13,17 @@ interface MatchedMed {
   genericPrice: number;
   savings: number;
   manufacturer: string;
+  writtenName?: string;
+  alternatives?: Array<{
+    id: number;
+    brandName: string;
+    genericName: string;
+    composition: string;
+    brandPrice: number;
+    genericPrice: number;
+    savings: number;
+    manufacturer: string;
+  }>;
 }
 
 interface Summary {
@@ -21,24 +32,6 @@ interface Summary {
   totalSavings: number;
   savingsPercent: number;
 }
-
-const SAMPLE_PRESCRIPTIONS = [
-  {
-    title: "Symptom Complex A (Brand Names)",
-    text: "Rx\nCrocin 650mg - 1 tab thrice daily\nAugmentin 625 Duo - 1 tab morning & night\nLipitor 10mg - 1 tab before bed\nQty: 10 each",
-    description: "Contains popular Indian branded medicines (Crocin, Augmentin, Lipitor)"
-  },
-  {
-    title: "Symptom Complex B (Generic Chemicals)",
-    text: "Dr. Sharma's Clinic\nPatient: Self\n- Paracetamol 650mg tab\n- Metformin Hydrochloride 500mg\n- Atorvastatin 10mg\nTake as directed.",
-    description: "Doctor-prescribed generic active chemical names (Paracetamol, Metformin, Atorvastatin)"
-  },
-  {
-    title: "Symptom Complex C (Mixed & Asthma)",
-    text: "Rx\nAsthalin Inhaler - 2 puffs as needed\nGlycomet 500mg - 1 tab after breakfast\nCrocin - 1 tab SOS\nStay hydrated.",
-    description: "Combination of branded drugs and chronic management inhalers"
-  }
-];
 
 function PrescriptionOptimizer() {
   const [showQRModal, setShowQRModal] = useState<boolean>(false);
@@ -54,9 +47,16 @@ function PrescriptionOptimizer() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selectedFile = e.target.files[0];
+      
+      // Clear previous results/status, but DO NOT clear the file and previewUrl!
+      setOcrStatus('');
+      setOcrProgress(0);
+      setExtractedText('');
+      setMatchedMeds([]);
+      setSummary(null);
+      
       setFile(selectedFile);
       setPreviewUrl(URL.createObjectURL(selectedFile));
-      resetStates();
     }
   };
 
@@ -101,46 +101,106 @@ function PrescriptionOptimizer() {
     }
   };
 
-  // Execute OCR scan on the uploaded image
-  const processOCR = async () => {
-    if (!previewUrl) return;
-    setLoading(true);
-    setOcrStatus('Initializing OCR engine...');
-    setOcrProgress(10);
+  // Read file contents as Base64 helper
+  const getBase64 = (fileToEncode: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(fileToEncode);
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64Data = result.split(',')[1];
+        resolve(base64Data);
+      };
+      reader.onerror = error => reject(error);
+    });
+  };
 
+  // Execute client-side OCR scan fallback
+  const runClientOcrFallback = async () => {
+    if (!file) return;
+    const isPdf = file.type === 'application/pdf' || file.name.endsWith('.pdf');
+    if (isPdf) {
+      setOcrStatus('Local OCR only supports image files. For PDF support, please configure GEMINI_API_KEY in the server .env file.');
+      setOcrProgress(0);
+      return;
+    }
+
+    setOcrStatus('Initializing local OCR engine...');
+    setOcrProgress(10);
     try {
       const result = await Tesseract.recognize(
-        previewUrl,
+        file,
         'eng',
         {
           logger: m => {
             if (m.status === 'recognizing text') {
-              setOcrStatus(`Extracting text from prescription image: ${Math.round(m.progress * 100)}%`);
-              setOcrProgress(Math.round(10 + m.progress * 70));
+              setOcrStatus(`Extracting text locally: ${Math.round(m.progress * 100)}%`);
+              setOcrProgress(Math.round(10 + m.progress * 60));
             }
           }
         }
       );
-
       const parsedText = result.data.text;
       setExtractedText(parsedText);
-      
-      // Match the parsed text
+      setOcrStatus('Matching extracted text with database...');
+      setOcrProgress(80);
       await runPrescriptionMatch(parsedText);
-    } catch (err) {
-      console.error(err);
-      setOcrStatus('Error scanning prescription image.');
+    } catch (ocrErr) {
+      console.error(ocrErr);
+      setOcrStatus('Failed to scan prescription image locally.');
       setOcrProgress(0);
+    }
+  };
+
+  // Execute OCR scan on the uploaded image
+  const processOCR = async () => {
+    if (!file) return;
+    setLoading(true);
+    setOcrStatus('Uploading and analyzing prescription sheet with Gemini AI...');
+    setOcrProgress(20);
+
+    try {
+      const base64Data = await getBase64(file);
+      setOcrProgress(40);
+      
+      const response = await fetch('http://localhost:5000/api/optimize-prescription-file', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          fileData: base64Data,
+          mimeType: file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
+        })
+      });
+
+      setOcrProgress(70);
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.error === 'GEMINI_API_KEY_MISSING') {
+          console.warn('Gemini API key missing on backend. Falling back to local OCR...');
+          setOcrStatus('Backend Gemini API key not found. Falling back to local OCR...');
+          await runClientOcrFallback();
+          return;
+        }
+        throw new Error(data.message || 'File optimization request failed');
+      }
+
+      setExtractedText(data.extractedText || '');
+      setMatchedMeds(data.matchedMedicines || []);
+      setSummary(data.summary || null);
+      setOcrStatus('Prescription successfully analyzed with Gemini AI!');
+      setOcrProgress(100);
+    } catch (err: any) {
+      console.error('AI upload/analysis failed, attempting client-side OCR fallback:', err);
+      setOcrStatus('AI upload failed. Falling back to local OCR scanner...');
+      await runClientOcrFallback();
+    } finally {
       setLoading(false);
     }
   };
 
-  // Load a sample preset prescription and optimize instantly
-  const loadPresetSample = async (sampleText: string) => {
-    resetStates();
-    setExtractedText(sampleText);
-    await runPrescriptionMatch(sampleText);
-  };
 
   const downloadPrescriptionReport = () => {
     if (!summary || matchedMeds.length === 0) return;
@@ -188,18 +248,40 @@ function PrescriptionOptimizer() {
     let y = 105;
     
     matchedMeds.forEach(med => {
-      doc.text(med.brandName, 15, y);
-      doc.text(med.genericName, 85, y);
+      if (y > 260) {
+        doc.addPage();
+        y = 20;
+      }
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.text(`${med.writtenName || med.brandName} (${med.composition})`, 15, y);
       doc.text(`₹${med.brandPrice.toFixed(2)}`, 150, y);
-      doc.text(`₹${med.genericPrice.toFixed(2)}`, 175, y);
+      y += 5.5;
+      
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(8.5);
-      doc.setTextColor(120, 120, 120);
-      doc.text(`Composition: ${med.composition} (Save ${med.savings}%)`, 15, y + 5);
+      doc.setTextColor(100, 100, 100);
+      doc.text('5 Recommended Generic Alternatives:', 18, y);
+      y += 4.5;
+      
+      if (med.alternatives) {
+        med.alternatives.forEach((alt, idx) => {
+          if (y > 270) {
+            doc.addPage();
+            y = 20;
+          }
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(15, 23, 42);
+          doc.text(`${idx + 1}. ${alt.brandName} (${alt.genericName}) - Mfr: ${alt.manufacturer}`, 22, y);
+          doc.text(`₹${alt.genericPrice.toFixed(2)} (${alt.savings}% off)`, 160, y);
+          y += 5;
+        });
+      }
+      
       doc.setTextColor(0, 0, 0);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      y += 15;
+      y += 4;
     });
     
     doc.line(15, y, 195, y);
@@ -237,44 +319,7 @@ function PrescriptionOptimizer() {
         </p>
       </div>
 
-      {/* Preset Test Section */}
-      <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', background: 'linear-gradient(135deg, rgba(13, 148, 136, 0.05) 0%, var(--bg-card) 100%)', border: '1px solid rgba(45, 212, 191, 0.15)' }}>
-        <h4 style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#2dd4bf', marginBottom: '8px', fontWeight: 800 }}>
-          <Sparkles size={18} className="pulse-button" />
-          One-Click Demo: Try Sample Prescriptions
-        </h4>
-        <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
-          <strong>What is this?</strong> If you do not have a prescription photo on hand, you can click any of these pre-compiled medical sheets. It simulates the OCR text extraction process and instantly identifies the generic equivalents from the database!
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '10px' }}>
-          {SAMPLE_PRESCRIPTIONS.map((sample, idx) => (
-            <button
-              key={idx}
-              className="btn btn-secondary"
-              onClick={() => loadPresetSample(sample.text)}
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'flex-start',
-                textAlign: 'left',
-                padding: '12px',
-                borderRadius: '10px',
-                height: 'auto',
-                borderColor: 'var(--border-color)',
-                background: 'var(--bg-card)'
-              }}
-            >
-              <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <Clipboard size={14} color="var(--primary)" />
-                {sample.title}
-              </span>
-              <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: '1.3' }}>
-                {sample.description}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
+
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
         
@@ -288,11 +333,11 @@ function PrescriptionOptimizer() {
             </h3>
             
             <label className="ocr-uploader">
-              <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
+              <input type="file" accept="image/*,application/pdf" style={{ display: 'none' }} onChange={handleFileChange} />
               <FileText size={42} color="var(--text-muted)" className="pulse-button" style={{ padding: '4px' }} />
               <div>
-                <p style={{ fontWeight: 'bold', fontSize: '0.9rem' }}>Choose prescription image</p>
-                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>Supports PNG, JPG, JPEG camera captures</p>
+                <p style={{ fontWeight: 'bold', fontSize: '0.9rem' }}>Choose prescription sheet</p>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>Supports PDF documents, PNG, JPG, JPEG captures</p>
               </div>
             </label>
 
@@ -302,7 +347,15 @@ function PrescriptionOptimizer() {
                   <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>File preview</span>
                   <button className="btn btn-secondary" style={{ padding: '2px 8px', fontSize: '0.75rem' }} onClick={resetStates}>Reset</button>
                 </div>
-                <img src={previewUrl} alt="Prescription preview" style={{ width: '100%', maxHeight: '200px', objectFit: 'contain', background: '#020617' }} />
+                {file && (file.type === 'application/pdf' || file.name.endsWith('.pdf')) ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '1.5rem', background: '#020617', color: 'var(--text-main)' }}>
+                    <FileText size={48} color="var(--primary)" style={{ marginBottom: '0.5rem' }} />
+                    <span style={{ fontSize: '0.82rem', fontWeight: 600, wordBreak: 'break-all', textAlign: 'center' }}>{file.name}</span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>{(file.size / 1024 / 1024).toFixed(2)} MB • PDF Document</span>
+                  </div>
+                ) : (
+                  <img src={previewUrl} alt="Prescription preview" style={{ width: '100%', maxHeight: '200px', objectFit: 'contain', background: '#020617' }} />
+                )}
               </div>
             )}
 
@@ -388,6 +441,30 @@ function PrescriptionOptimizer() {
           ) : (
             <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               
+              {/* Raw Extracted Text Box */}
+              <div style={{
+                padding: '0.85rem 1rem',
+                background: 'var(--bg-input)',
+                border: '1px solid var(--border-color)',
+                borderRadius: '8px',
+                maxHeight: '150px',
+                overflowY: 'auto'
+              }}>
+                <h4 style={{ fontSize: '0.74rem', fontWeight: 800, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px', letterSpacing: '0.5px' }}>
+                  <FileText size={13} color="var(--primary)" /> Extracted Prescription Content (As Written)
+                </h4>
+                <pre style={{ 
+                  margin: 0, 
+                  fontSize: '0.78rem', 
+                  color: 'var(--text-main)', 
+                  whiteSpace: 'pre-wrap', 
+                  fontFamily: 'monospace',
+                  lineHeight: '1.4'
+                }}>
+                  {extractedText}
+                </pre>
+              </div>
+
               {/* Savings metrics banner */}
               <div style={{ 
                 padding: '1.1rem', 
@@ -408,9 +485,9 @@ function PrescriptionOptimizer() {
                 </div>
               </div>
 
-              {/* Matched Medicines list */}
+              {/* Matched Medicines list with 5 alternatives */}
               <div>
-                <h4 style={{ fontSize: '0.88rem', color: 'var(--text-main)', marginBottom: '8px', fontWeight: 700 }}>Matched Medicines Registry</h4>
+                <h4 style={{ fontSize: '0.88rem', color: 'var(--text-main)', marginBottom: '8px', fontWeight: 700 }}>Optimized Generic Substitutes</h4>
                 {matchedMeds.length === 0 ? (
                   <div style={{ padding: '1.5rem', background: 'rgba(248, 113, 113, 0.04)', border: '1px solid rgba(248, 113, 113, 0.15)', borderRadius: '8px', textAlign: 'center' }}>
                     <p style={{ color: '#f87171', fontSize: '0.82rem', lineHeight: '1.4' }}>
@@ -418,24 +495,44 @@ function PrescriptionOptimizer() {
                     </p>
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', maxHeight: '350px', overflowY: 'auto', paddingRight: '4px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '420px', overflowY: 'auto', paddingRight: '4px' }}>
                     {matchedMeds.map(med => {
-                      const savingAmt = med.brandPrice - med.genericPrice;
                       return (
-                        <div key={med.id} className="list-item-hover" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                          <div>
-                            <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                              {med.brandName}
-                              <span style={{ color: 'var(--danger)', fontSize: '0.8rem', marginLeft: '6px', fontWeight: 'normal' }}>₹{med.brandPrice}</span>
+                        <div key={med.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '12px', background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid var(--border-color)', paddingBottom: '6px' }}>
+                            <div>
+                              <div style={{ fontSize: '0.88rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                                {med.writtenName || med.brandName}
+                                <span style={{ color: 'var(--danger)', fontSize: '0.76rem', marginLeft: '6px', fontWeight: 'normal', textDecoration: 'line-through' }}>₹{med.brandPrice.toFixed(2)}</span>
+                              </div>
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>Composition: {med.composition}</div>
                             </div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>Comp: {med.composition}</div>
-                            <div style={{ fontSize: '0.8rem', color: 'var(--success)', marginTop: '4px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                              <Eye size={12} /> Equivalent: {med.genericName} <strong style={{ color: '#2dd4bf' }}>₹{med.genericPrice}</strong>
-                            </div>
+                            <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)', padding: '2px 6px', borderRadius: '4px' }}>
+                              {med.manufacturer}
+                            </span>
                           </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px' }}>
-                            <div style={{ color: '#10b981', fontWeight: 800, fontSize: '0.85rem' }}>-{med.savings}%</div>
-                            <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Save ₹{savingAmt.toFixed(0)}</div>
+                          
+                          <div>
+                            <div style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--primary)', marginBottom: '5px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                              5 Certified Generic Alternatives
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                              {med.alternatives && med.alternatives.map((alt: any, altIdx: number) => {
+                                return (
+                                  <div key={alt.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(13, 148, 136, 0.02)', border: '1px dashed rgba(13, 148, 136, 0.12)', borderRadius: '6px', padding: '5px 8px', fontSize: '0.76rem' }}>
+                                    <div style={{ minWidth: 0, flex: 1, paddingRight: '10px' }}>
+                                      <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>{altIdx + 1}. {alt.brandName}</span>
+                                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginLeft: '4px', display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px', verticalAlign: 'bottom' }}>({alt.genericName})</span>
+                                      <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>Mfr: {alt.manufacturer}</div>
+                                    </div>
+                                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                                      <div style={{ fontWeight: 800, color: '#10b981' }}>₹{alt.genericPrice.toFixed(2)}</div>
+                                      <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>Save {alt.savings}%</div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
                         </div>
                       );

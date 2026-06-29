@@ -7,6 +7,7 @@ interface MedicineListItem {
   brandPrice: number;
   genericPrice: number;
   savings: number;
+  writtenName?: string;
 }
 
 interface QRPrescriptionProps {
@@ -32,7 +33,7 @@ const QRPrescription: React.FC<QRPrescriptionProps> = ({
   const prescriptionSummaryString = `GENMED prescription optimizer summary:
 --------------------
 Items:
-${medicines.map((m, idx) => `${idx + 1}. ${m.brandName} -> Switch to ${m.genericName}`).join('\n')}
+${medicines.map((m, idx) => `${idx + 1}. ${m.writtenName || m.brandName} -> Switch to ${m.genericName}`).join('\n')}
 --------------------
 Total Branded: INR ${totalBranded}
 Total Generic: INR ${totalGeneric}
@@ -141,7 +142,7 @@ Scan with PMBJP Kendra pharmacist.`;
               {medicines.map((med, idx) => (
                 <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', paddingBottom: '6px', borderBottom: '1px dashed rgba(255,255,255,0.05)' }}>
                   <div>
-                    <span style={{ color: '#ef4444', textDecoration: 'line-through', marginRight: '6px' }}>{med.brandName}</span>
+                    <span style={{ color: '#ef4444', textDecoration: 'line-through', marginRight: '6px' }}>{med.writtenName || med.brandName}</span>
                     <span style={{ color: '#cbd5e1', fontWeight: 600 }}>→ {med.genericName}</span>
                   </div>
                   <span style={{ color: '#10b981', fontWeight: 600 }}>₹{med.genericPrice}</span>

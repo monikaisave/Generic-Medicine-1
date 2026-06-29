@@ -26,7 +26,6 @@ import MarketIntelligence from './pages/MarketIntelligence';
 import NearbyShops from './pages/NearbyShops';
 import SafetyAnalyzer from './pages/SafetyAnalyzer';
 import HealthWallet from './pages/HealthWallet';
-import SavingsCalculator from './pages/SavingsCalculator';
 import GenericSubstituteScanner from './pages/GenericSubstituteScanner';
 import MedicineReminder from './pages/MedicineReminder';
 import OverviewDashboard from './pages/OverviewDashboard';
@@ -99,37 +98,6 @@ function App() {
     setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   };
 
-  const renderContent = () => {
-    switch (activeTab) {
-      case 'overview':
-        return <OverviewDashboard setActiveTab={setActiveTab} setSelectedMedicineId={setSelectedMedicineId} />;
-      case 'recommendation':
-        return <RecommendationSystem />;
-      case 'substitute-scanner':
-        return <GenericSubstituteScanner setActiveTab={setActiveTab} setSelectedMedicineId={setSelectedMedicineId} />;
-      case 'dashboard':
-        return <PriceAnalysisDashboard />;
-      case 'prescription':
-        return <PrescriptionOptimizer />;
-      case 'nearby-shops':
-        return <NearbyShops selectedMedicineId={selectedMedicineId} setSelectedMedicineId={setSelectedMedicineId} />;
-      case 'scheme':
-        return <SchemeAwareness />;
-      case 'market':
-        return <MarketIntelligence />;
-      case 'safety':
-        return <SafetyAnalyzer />;
-      case 'wallet':
-        return <HealthWallet />;
-      case 'reminders':
-        return <MedicineReminder setActiveTab={setActiveTab} setSelectedMedicineId={setSelectedMedicineId} />;
-      case 'calculator':
-        return <SavingsCalculator />;
-      default:
-        return <RecommendationSystem />;
-    }
-  };
-
   // Nav Items Definitions
   const coreItems = [
     { id: 'recommendation', label: t('alternativeFinder'), icon: Search },
@@ -147,7 +115,6 @@ function App() {
   const utilityItems = [
     { id: 'wallet', label: t('healthWallet'), icon: Wallet },
     { id: 'reminders', label: t('medicineReminder'), icon: Bell },
-    { id: 'calculator', label: t('savingsCalculator'), icon: Calculator },
     { id: 'scheme', label: t('govSchemes'), icon: BookOpen }
   ];
 
@@ -242,7 +209,17 @@ function App() {
         </header>
 
         <div className="fade-in-section">
-          {renderContent()}
+          {activeTab === 'overview' && <OverviewDashboard setActiveTab={setActiveTab} setSelectedMedicineId={setSelectedMedicineId} />}
+          {activeTab === 'recommendation' && <RecommendationSystem />}
+          {activeTab === 'substitute-scanner' && <GenericSubstituteScanner setActiveTab={setActiveTab} setSelectedMedicineId={setSelectedMedicineId} />}
+          {activeTab === 'dashboard' && <PriceAnalysisDashboard />}
+          {activeTab === 'prescription' && <PrescriptionOptimizer />}
+          {activeTab === 'nearby-shops' && <NearbyShops selectedMedicineId={selectedMedicineId} setSelectedMedicineId={setSelectedMedicineId} />}
+          {activeTab === 'scheme' && <SchemeAwareness />}
+          {activeTab === 'market' && <MarketIntelligence />}
+          {activeTab === 'safety' && <SafetyAnalyzer />}
+          {activeTab === 'wallet' && <HealthWallet />}
+          {activeTab === 'reminders' && <MedicineReminder setActiveTab={setActiveTab} setSelectedMedicineId={setSelectedMedicineId} />}
         </div>
       </main>
 
