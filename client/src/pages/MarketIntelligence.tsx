@@ -20,7 +20,7 @@ interface PricePrediction {
 
 function MarketIntelligence() {
   const [timeline, setTimeline] = useState<TimelineData[]>([]);
-  const [horizon, setHorizon] = useState<number>(6);
+  const [horizon, setHorizon] = useState<number>(24);
   const [brandPriceInput, setBrandPriceInput] = useState<string>('180');
   const [categoryInput, setCategoryInput] = useState<string>('Antibiotics');
   const [prediction, setPrediction] = useState<PricePrediction | null>(null);
@@ -99,7 +99,7 @@ function MarketIntelligence() {
             <input 
               type="range" 
               min={3} 
-              max={12} 
+              max={24} 
               value={horizon} 
               className="range-slider"
               onChange={(e) => setHorizon(parseInt(e.target.value))}

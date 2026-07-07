@@ -11,7 +11,7 @@ interface ChatMessage {
 const Chatbot: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: '1', sender: 'bot', text: 'Namaste! I am GenMed AI, your generic medicine guide. Ask me about medicine alternatives, cost savings, side effects, or government health schemes like PMBJP!', timestamp: new Date() }
+    { id: '1', sender: 'bot', text: 'Namaste! I am GenMed AI, your generic medicine and general health AI assistant. I can answer any questions you have on medicines, health schemes, or any other topic. Ask me anything!', timestamp: new Date() }
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -262,6 +262,7 @@ const Chatbot: React.FC = () => {
                 {quickReplies.map(reply => (
                   <button
                     key={reply}
+                    disabled={isLoading}
                     onClick={() => handleSend(reply)}
                     style={{
                       padding: '6px 10px',
@@ -269,12 +270,13 @@ const Chatbot: React.FC = () => {
                       borderRadius: '8px',
                       background: 'rgba(13, 148, 136, 0.08)',
                       border: '1px solid rgba(13, 148, 136, 0.2)',
-                      color: '#2dd4bf',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
+                      color: isLoading ? '#64748b' : '#2dd4bf',
+                      cursor: isLoading ? 'not-allowed' : 'pointer',
+                      transition: 'all 0.2s',
+                      opacity: isLoading ? 0.6 : 1
                     }}
-                    onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(13, 148, 136, 0.18)')}
-                    onMouseOut={(e) => (e.currentTarget.style.background = 'rgba(13, 148, 136, 0.08)')}
+                    onMouseOver={(e) => { if (!isLoading) e.currentTarget.style.background = 'rgba(13, 148, 136, 0.18)'; }}
+                    onMouseOut={(e) => { if (!isLoading) e.currentTarget.style.background = 'rgba(13, 148, 136, 0.08)'; }}
                   >
                     {reply}
                   </button>
@@ -294,25 +296,33 @@ const Chatbot: React.FC = () => {
             <input
               type="text"
               value={input}
+              disabled={isLoading}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleSend(input); }}
-              placeholder="Ask anything about medicines..."
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isLoading) handleSend(input); }}
+              placeholder={isLoading ? "AI is typing..." : "Ask me anything..."}
               style={{
                 flexGrow: 1,
                 padding: '10px 14px',
                 borderRadius: '10px',
-                background: '#121b2d',
+                background: isLoading ? '#0f172a' : '#121b2d',
                 border: '1px solid rgba(255, 255, 255, 0.08)',
-                color: 'white',
+                color: isLoading ? '#64748b' : 'white',
                 fontSize: '0.9rem',
-                outline: 'none'
+                outline: 'none',
+                cursor: isLoading ? 'not-allowed' : 'text'
               }}
             />
             <button
+              disabled={isLoading || !input.trim()}
               onClick={() => handleSend(input)}
               style={{
-                width: '42px', height: '42px', borderRadius: '10px', background: '#0d9488', border: 'none',
-                color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
+                width: '42px', height: '42px', borderRadius: '10px',
+                background: (isLoading || !input.trim()) ? '#1e293b' : '#0d9488',
+                border: 'none',
+                color: (isLoading || !input.trim()) ? '#64748b' : 'white',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: (isLoading || !input.trim()) ? 'not-allowed' : 'pointer',
+                opacity: (isLoading || !input.trim()) ? 0.6 : 1
               }}
             >
               <Send size={18} />

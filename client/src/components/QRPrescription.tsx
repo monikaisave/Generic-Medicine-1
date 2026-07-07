@@ -8,6 +8,7 @@ interface MedicineListItem {
   genericPrice: number;
   savings: number;
   writtenName?: string;
+  unmatched?: boolean;
 }
 
 interface QRPrescriptionProps {
@@ -29,11 +30,10 @@ const QRPrescription: React.FC<QRPrescriptionProps> = ({
 }) => {
   const printRef = useRef<HTMLDivElement | null>(null);
 
-  // Formulate data string for QR code
   const prescriptionSummaryString = `GENMED prescription optimizer summary:
 --------------------
 Items:
-${medicines.map((m, idx) => `${idx + 1}. ${m.writtenName || m.brandName} -> Switch to ${m.genericName}`).join('\n')}
+${medicines.map((m, idx) => `${idx + 1}. ${m.writtenName || m.brandName} -> ${m.unmatched ? 'No generic alternatives found' : `Switch to ${m.genericName}`}`).join('\n')}
 --------------------
 Total Branded: INR ${totalBranded}
 Total Generic: INR ${totalGeneric}
@@ -142,10 +142,16 @@ Scan with PMBJP Kendra pharmacist.`;
               {medicines.map((med, idx) => (
                 <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', paddingBottom: '6px', borderBottom: '1px dashed rgba(255,255,255,0.05)' }}>
                   <div>
-                    <span style={{ color: '#ef4444', textDecoration: 'line-through', marginRight: '6px' }}>{med.writtenName || med.brandName}</span>
-                    <span style={{ color: '#cbd5e1', fontWeight: 600 }}>→ {med.genericName}</span>
+                    {med.brandPrice > 0 ? (
+                      <span style={{ color: '#ef4444', textDecoration: 'line-through', marginRight: '6px' }}>{med.writtenName || med.brandName}</span>
+                    ) : (
+                      <span style={{ color: '#94a3b8', marginRight: '6px' }}>{med.writtenName || med.brandName}</span>
+                    )}
+                    <span style={{ color: '#cbd5e1', fontWeight: 600 }}>
+                      {med.unmatched ? ' (No generic alternatives)' : ` → ${med.genericName}`}
+                    </span>
                   </div>
-                  <span style={{ color: '#10b981', fontWeight: 600 }}>₹{med.genericPrice}</span>
+                  {!med.unmatched && <span style={{ color: '#10b981', fontWeight: 600 }}>₹{med.genericPrice}</span>}
                 </div>
               ))}
             </div>

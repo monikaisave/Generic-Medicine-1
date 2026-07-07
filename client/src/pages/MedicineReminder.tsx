@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Bell, Clock, Plus, Trash2, User, Check, X, AlertTriangle, RefreshCw, Search, HeartPulse } from 'lucide-react';
+import { Bell, Clock, Plus, Trash2, Check, X, Search } from 'lucide-react';
 
 interface Reminder {
   id: string;
@@ -8,8 +8,8 @@ interface Reminder {
   dosage: string; // e.g. "1 Tablet"
   times: string[]; // e.g. ["Morning", "Night"]
   familyMember: string; // e.g. "Self", "Father", "Mother", "Spouse"
-  currentStock: number;
-  threshold: number;
+  currentStock?: number;
+  threshold?: number;
   logs: Record<string, 'taken' | 'skipped'>; // date_time -> status
   customAlarmTime?: string; // e.g. "08:30"
 }
@@ -40,8 +40,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
   const [dosage, setDosage] = useState('1 Tablet');
   const [times, setTimes] = useState<string[]>(['Morning']);
   const [familyMember, setFamilyMember] = useState('Self');
-  const [initialStock, setInitialStock] = useState('30');
-  const [alertThreshold, setAlertThreshold] = useState('5');
   const [customAlarmTime, setCustomAlarmTime] = useState('');
   const [activeAlarm, setActiveAlarm] = useState<{ reminder: Reminder; time: string } | null>(null);
 
@@ -129,8 +127,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
           dosage: '1 Tablet',
           times: ['Night'],
           familyMember: 'Father',
-          currentStock: 4, // triggers low stock!
-          threshold: 5,
           logs: {}
         },
         {
@@ -140,8 +136,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
           dosage: '1 Tablet',
           times: ['Morning', 'Evening'],
           familyMember: 'Self',
-          currentStock: 24,
-          threshold: 5,
           logs: {}
         }
       ];
@@ -195,8 +189,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
       dosage,
       times,
       familyMember,
-      currentStock: parseInt(initialStock) || 0,
-      threshold: parseInt(alertThreshold) || 5,
       customAlarmTime: customAlarmTime || undefined,
       logs: {}
     };
@@ -212,8 +204,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
     setDosage('1 Tablet');
     setTimes(['Morning']);
     setFamilyMember('Self');
-    setInitialStock('30');
-    setAlertThreshold('5');
     setCustomAlarmTime('');
   };
 
@@ -231,29 +221,11 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
     const updated = reminders.map(r => {
       if (r.id === id) {
         const logs = { ...r.logs, [logKey]: status };
-        let currentStock = r.currentStock;
-        
-        // Decrement stock if marked taken, and was not already marked taken
-        if (status === 'taken' && r.logs[logKey] !== 'taken') {
-          currentStock = Math.max(0, currentStock - 1);
-        }
-        
-        return { ...r, logs, currentStock };
+        return { ...r, logs };
       }
       return r;
     });
 
-    saveToStorage(updated);
-  };
-
-  // Quick Refill stock count
-  const handleRefillStock = (id: string, count: number) => {
-    const updated = reminders.map(r => {
-      if (r.id === id) {
-        return { ...r, currentStock: r.currentStock + count };
-      }
-      return r;
-    });
     saveToStorage(updated);
   };
 
@@ -315,10 +287,10 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
         </div>
       </div>
 
-      {/* Main Grid: Schedule vs Stock Inventory */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: '2rem', alignItems: 'start' }}>
+      {/* Main Grid: Daily Timeline & Schedules */}
+      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
         
-        {/* Left Side: Daily Timeline & Schedules */}
+        {/* Daily Timeline & Schedules */}
         <div>
           
           {/* Filters and Add Button */}
@@ -375,7 +347,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
                         {slotReminders.map(rem => {
                           const logKey = `${today}_${slot}`;
                           const status = rem.logs[logKey];
-                          const isLowStock = rem.currentStock <= rem.threshold;
                           const tagColor = patientColors[rem.familyMember.toLowerCase()] || '#64748b';
 
                           return (
@@ -410,7 +381,7 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
                                     {rem.medicineName}
                                   </h4>
                                   <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                                    Dosage: {rem.dosage} | Remaining Stock: <span style={{ fontWeight: 700, color: isLowStock ? '#ef4444' : '#2dd4bf' }}>{rem.currentStock} pills</span>
+                                    Dosage: {rem.dosage}
                                   </p>
                                 </div>
                               </div>
@@ -473,111 +444,6 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
             )}
           </div>
         </div>
-
-        {/* Right Side: Active Stocks & Refills Monitor */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          
-          <div className="card" style={{ padding: '1.5rem' }}>
-            <h3 className="card-title" style={{ fontSize: '1rem', color: '#cbd5e1' }}>
-              <HeartPulse size={18} /> Pill Stock Inventory
-            </h3>
-
-            {reminders.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '2rem 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                Inventory empty. Add reminders to monitor stocks.
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '10px' }}>
-                {reminders.map(rem => {
-                  const isLow = rem.currentStock <= rem.threshold;
-                  const pct = Math.min(100, Math.max(0, (rem.currentStock / 30) * 100)); // assume 30 is target
-                  
-                  return (
-                    <div key={rem.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', paddingBottom: '12px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                        <span style={{ fontWeight: 600, fontSize: '0.85rem', color: '#e2e8f0', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {rem.medicineName.split('(')[0]}
-                        </span>
-                        <span style={{ fontSize: '0.8rem', fontWeight: 700, color: isLow ? '#ef4444' : '#2dd4bf' }}>
-                          {rem.currentStock} Remaining
-                        </span>
-                      </div>
-
-                      {/* Stock level progress bar */}
-                      <div style={{ width: '100%', height: '6px', background: 'rgba(255,255,255,0.06)', borderRadius: '10px', overflow: 'hidden', marginBottom: '8px' }}>
-                        <div style={{
-                          width: `${pct}%`,
-                          height: '100%',
-                          background: isLow ? 'linear-gradient(to right, #f87171, #ef4444)' : 'linear-gradient(to right, #2dd4bf, #10b981)',
-                          borderRadius: '10px'
-                        }} />
-                      </div>
-
-                      {/* Low Stock Warning Callout */}
-                      {isLow && (
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          background: 'rgba(239, 68, 68, 0.06)',
-                          border: '1px solid rgba(239, 68, 68, 0.15)',
-                          borderRadius: '6px',
-                          padding: '6px 10px',
-                          marginTop: '6px'
-                        }}>
-                          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: '#f87171', fontWeight: 700 }}>
-                            <AlertTriangle size={12} /> LOW STOCK WARNING!
-                          </span>
-                          
-                          <div style={{ display: 'flex', gap: '6px' }}>
-                            <button
-                              style={{
-                                background: 'rgba(255,255,255,0.05)',
-                                border: '1px solid rgba(255,255,255,0.1)',
-                                color: '#f8fafc',
-                                padding: '2px 6px',
-                                fontSize: '0.68rem',
-                                borderRadius: '4px',
-                                cursor: 'pointer'
-                              }}
-                              onClick={() => handleRefillStock(rem.id, 30)}
-                            >
-                              +30 Refill
-                            </button>
-                            
-                            {rem.medicineId && (
-                              <button
-                                style={{
-                                  background: 'linear-gradient(135deg, #0d9488, #0f766e)',
-                                  border: 'none',
-                                  color: '#fff',
-                                  padding: '2px 6px',
-                                  fontSize: '0.68rem',
-                                  borderRadius: '4px',
-                                  cursor: 'pointer',
-                                  fontWeight: 600
-                                }}
-                                onClick={() => {
-                                  if (setSelectedMedicineId) {
-                                    setSelectedMedicineId(rem.medicineId!);
-                                  }
-                                  setActiveTab('nearby-shops');
-                                }}
-                              >
-                                Find Generic
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
       </div>
 
       {/* Add Reminder Modal Overlay */}
@@ -706,28 +572,15 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
               </div>
 
               {/* Dosage selection */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                <div>
-                  <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Dosage Size</label>
-                  <input
-                    type="text"
-                    className="search-input"
-                    style={{ height: '38px', padding: '8px 12px' }}
-                    value={dosage}
-                    onChange={e => setDosage(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Initial Pill Stock</label>
-                  <input
-                    type="number"
-                    className="search-input"
-                    style={{ height: '38px', padding: '8px 12px' }}
-                    value={initialStock}
-                    onChange={e => setInitialStock(e.target.value)}
-                    min="1"
-                  />
-                </div>
+              <div>
+                <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Dosage Size</label>
+                <input
+                  type="text"
+                  className="search-input"
+                  style={{ height: '38px', padding: '8px 12px' }}
+                  value={dosage}
+                  onChange={e => setDosage(e.target.value)}
+                />
               </div>
 
               {/* Schedule time slots checkboxes */}
@@ -753,18 +606,7 @@ const MedicineReminder: React.FC<MedicineReminderProps> = ({ setActiveTab, setSe
                 </div>
               </div>
 
-              {/* Stock alert warning threshold */}
-              <div>
-                <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Low Stock Alert Threshold (Pills remaining)</label>
-                <input
-                  type="number"
-                  className="search-input"
-                  style={{ height: '38px', padding: '8px 12px' }}
-                  value={alertThreshold}
-                  onChange={e => setAlertThreshold(e.target.value)}
-                  min="0"
-                />
-              </div>
+
 
               {/* Custom Alarm Time Input */}
               <div>
